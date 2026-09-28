@@ -28,10 +28,13 @@ const REACTIONS = [
 ];
 
 function formatDate(date = new Date()) {
-  const d = String(date.getDate()).padStart(2, '0');
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const y = date.getFullYear();
-  return `${d}/${m}/${y}`;
+  const tz = process.env.TIMEZONE || 'Europe/Paris';
+  return new Intl.DateTimeFormat('fr-FR', {
+    timeZone: tz,
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  }).format(date);
 }
 
 /**
