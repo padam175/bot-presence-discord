@@ -97,11 +97,12 @@ client.on('interactionCreate', async (interaction) => {
   const date = interaction.options.getString('date');
 
   try {
-    await postPresenceRequest(interaction.channel, { lieu, cp, date });
-    await interaction.reply({ content: 'Demande de présence envoyée ✅', ephemeral: true });
+    const channel = interaction.channel ?? (await interaction.client.channels.fetch(interaction.channelId));
+    await postPresenceRequest(channel, { lieu, cp, date });
+    await interaction.reply({ content: 'Demande de présence envoyée ✅', flags: 64 });
   } catch (err) {
     console.error(err);
-    await interaction.reply({ content: 'Erreur lors de l\'envoi ❌', ephemeral: true });
+    await interaction.reply({ content: 'Erreur lors de l\'envoi ❌', flags: 64 });
   }
 });
 
