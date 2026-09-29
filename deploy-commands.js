@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { REST, Routes, SlashCommandBuilder } = require('discord.js');
+const { REST, Routes, SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 
 const commands = [
   new SlashCommandBuilder()
@@ -16,6 +16,28 @@ const commands = [
     .addStringOption(opt =>
       opt.setName('date')
         .setDescription('Date au format JJ/MM/AAAA (défaut: aujourd\'hui)')
+        .setRequired(false))
+    .addBooleanOption(opt =>
+      opt.setName('forcer')
+        .setDescription('Republier même si une demande existe déjà pour cette date')
+        .setRequired(false))
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName('presence-config')
+    .setDescription('Voir ou modifier le lieu, le CP et l\'heure d\'envoi automatique')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addStringOption(opt =>
+      opt.setName('lieu')
+        .setDescription('Nouveau lieu par défaut (ex: villa)')
+        .setRequired(false))
+    .addStringOption(opt =>
+      opt.setName('cp')
+        .setDescription('Nouveau code postal par défaut (laisse vide pour le retirer)')
+        .setRequired(false))
+    .addStringOption(opt =>
+      opt.setName('heure')
+        .setDescription('Nouvelle heure d\'envoi automatique, format HH:MM (ex: 21:00)')
         .setRequired(false))
     .toJSON(),
 ];
