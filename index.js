@@ -1,5 +1,7 @@
 require('dotenv').config();
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const cron = require('node-cron');
 
@@ -27,6 +29,53 @@ const REACTIONS = [
   { emoji: '❌', label: 'Pas la' },
 ];
 
+// ---- Fichier d'état (dernière date déjà publiée, anti-doublon) ----
+const STATE_FILE = path.join(__dirname, 'state.json');
+
+function loadState() {
+  try {
+    return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function saveState(state) {
+  try {
+    fs.writeFileSync(STATE_FILE, JSON.stringify(state));
+  } catch (err) {
+    console.error('Impossible de sauvegarder state.json :', err);
+  }
+}
+
+// ---- Fichier de config (lieu, CP, heure d'envoi automatique) ----
+// Modifiable directement depuis Discord via /presence-config, sans toucher au code.
+// Note : comme state.json, ce fichier est remis à zéro à chaque nouveau déploiement
+// sur Render (nouveau push GitHub) et repart alors sur les valeurs du .env.
+const CONFIG_FILE = path.join(__dirname, 'config.json');
+
+function loadConfig() {
+  let saved = {};
+  try {
+    saved = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+  } catch {
+    saved = {};
+  }
+  return {
+    lieu: saved.lieu || process.env.DEFAULT_LOCATION || 'villa',
+    cp: saved.cp !== undefined ? saved.cp : (process.env.DEFAULT_CP || ''),
+    scheduleCron: saved.scheduleCron || process.env.SCHEDULE_CRON || '0 18 * * *',
+  };
+}
+
+function saveConfig(config) {
+  try {
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config));
+  } catch (err) {
+    console.error('Impossible de sauvegarder config.json :', err);
+  }
+}
+
 function formatDate(date = new Date()) {
   const tz = process.env.TIMEZONE || 'Europe/Paris';
   return new Intl.DateTimeFormat('fr-FR', {
@@ -39,11 +88,19 @@ function formatDate(date = new Date()) {
 
 /**
  * Poste le message de demande de présence + ajoute les réactions.
+ * Renvoie { skipped: true } si une demande a déjà été publiée pour cette date
+ * (sauf si force = true), sinon { skipped: false, message }.
  */
-async function postPresenceRequest(channel, { lieu, cp, date } = {}) {
-  const finalLieu = lieu || process.env.DEFAULT_LOCATION || 'villa';
-  const finalCp = cp || process.env.DEFAULT_CP || '';
+async function postPresenceRequest(channel, { lieu, cp, date, force } = {}) {
+  const config = loadConfig();
+  const finalLieu = lieu || config.lieu;
+  const finalCp = cp !== undefined && cp !== null ? cp : config.cp;
   const finalDate = date || formatDate();
+
+  const state = loadState();
+  if (!force && state.lastDate === finalDate) {
+    return { skipped: true, date: finalDate };
+  }
 
   const rdvLine = finalCp
     ? `📍 ${finalLieu} · CP ${finalCp}`
@@ -65,47 +122,125 @@ async function postPresenceRequest(channel, { lieu, cp, date } = {}) {
     await message.react(r.emoji);
   }
 
-  return message;
+  saveState({ ...state, lastDate: finalDate });
+
+  return { skipped: false, message, date: finalDate };
+}
+
+// ---- Gestion du cron (reprogrammable à chaud via /presence-config) ----
+let cronTask = null;
+
+function scheduleCronJob(cronExpr) {
+  if (cronTask) {
+    cronTask.stop();
+    cronTask = null;
+  }
+  if (!cronExpr) return;
+
+  cronTask = cron.schedule(
+    cronExpr,
+    async () => {
+      try {
+        const channel = await client.channels.fetch(process.env.CHANNEL_ID);
+        const result = await postPresenceRequest(channel);
+        if (result.skipped) {
+          console.log(`[${new Date().toISOString()}] Envoi automatique ignoré : déjà publié pour ${result.date}.`);
+        } else {
+          console.log(`[${new Date().toISOString()}] Demande de présence envoyée automatiquement.`);
+        }
+      } catch (err) {
+        console.error('Erreur lors de l\'envoi automatique :', err);
+      }
+    },
+    { timezone: process.env.TIMEZONE || 'Europe/Paris' }
+  );
+  console.log(`Envoi automatique programmé : "${cronExpr}" (${process.env.TIMEZONE || 'Europe/Paris'})`);
 }
 
 client.once('ready', () => {
   console.log(`Bot connecté en tant que ${client.user.tag}`);
-
-  if (process.env.SCHEDULE_CRON) {
-    cron.schedule(
-      process.env.SCHEDULE_CRON,
-      async () => {
-        try {
-          const channel = await client.channels.fetch(process.env.CHANNEL_ID);
-          await postPresenceRequest(channel);
-          console.log(`[${new Date().toISOString()}] Demande de présence envoyée automatiquement.`);
-        } catch (err) {
-          console.error('Erreur lors de l\'envoi automatique :', err);
-        }
-      },
-      { timezone: process.env.TIMEZONE || 'Europe/Paris' }
-    );
-    console.log(
-      `Envoi automatique programmé : "${process.env.SCHEDULE_CRON}" (${process.env.TIMEZONE || 'Europe/Paris'})`
-    );
-  }
+  const config = loadConfig();
+  scheduleCronJob(config.scheduleCron);
 });
 
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
-  if (interaction.commandName !== 'presence') return;
 
-  const lieu = interaction.options.getString('lieu');
-  const cp = interaction.options.getString('cp');
-  const date = interaction.options.getString('date');
+  // ---- /presence : publier une demande maintenant ----
+  if (interaction.commandName === 'presence') {
+    const lieu = interaction.options.getString('lieu');
+    const cp = interaction.options.getString('cp');
+    const date = interaction.options.getString('date');
+    const force = interaction.options.getBoolean('forcer') || false;
 
-  try {
-    const channel = interaction.channel ?? (await interaction.client.channels.fetch(interaction.channelId));
-    await postPresenceRequest(channel, { lieu, cp, date });
-    await interaction.reply({ content: 'Demande de présence envoyée ✅', flags: 64 });
-  } catch (err) {
-    console.error(err);
-    await interaction.reply({ content: 'Erreur lors de l\'envoi ❌', flags: 64 });
+    try {
+      const channel = interaction.channel ?? (await interaction.client.channels.fetch(interaction.channelId));
+      const result = await postPresenceRequest(channel, { lieu, cp, date, force });
+
+      if (result.skipped) {
+        await interaction.reply({
+          content: `⚠️ Une demande de présence a déjà été publiée pour le ${result.date}. Utilise l'option "forcer" si tu veux la republier quand même.`,
+          flags: 64,
+        });
+      } else {
+        await interaction.reply({ content: 'Demande de présence envoyée ✅', flags: 64 });
+      }
+    } catch (err) {
+      console.error(err);
+      await interaction.reply({ content: 'Erreur lors de l\'envoi ❌', flags: 64 });
+    }
+    return;
+  }
+
+  // ---- /presence-config : modifier lieu / CP / heure d'envoi automatique ----
+  if (interaction.commandName === 'presence-config') {
+    const lieu = interaction.options.getString('lieu');
+    const cp = interaction.options.getString('cp');
+    const heure = interaction.options.getString('heure');
+
+    const config = loadConfig();
+
+    if (!lieu && cp === null && !heure) {
+      // Aucune option fournie : afficher la config actuelle
+      await interaction.reply({
+        content:
+          `**Config actuelle**\n` +
+          `📍 Lieu : ${config.lieu}\n` +
+          `🏷️ CP : ${config.cp || '(non défini)'}\n` +
+          `⏰ Cron d'envoi automatique : \`${config.scheduleCron}\` (${process.env.TIMEZONE || 'Europe/Paris'})`,
+        flags: 64,
+      });
+      return;
+    }
+
+    if (heure) {
+      const match = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(heure.trim());
+      if (!match) {
+        await interaction.reply({
+          content: '❌ Format d\'heure invalide. Utilise HH:MM, ex : 21:00',
+          flags: 64,
+        });
+        return;
+      }
+      const [, hh, mm] = match;
+      config.scheduleCron = `${Number(mm)} ${Number(hh)} * * *`;
+    }
+
+    if (lieu) config.lieu = lieu;
+    if (cp !== null) config.cp = cp; // permet de vider le CP avec une chaîne vide
+
+    saveConfig(config);
+    scheduleCronJob(config.scheduleCron);
+
+    await interaction.reply({
+      content:
+        `✅ Config mise à jour :\n` +
+        `📍 Lieu : ${config.lieu}\n` +
+        `🏷️ CP : ${config.cp || '(non défini)'}\n` +
+        `⏰ Envoi automatique : \`${config.scheduleCron}\` (${process.env.TIMEZONE || 'Europe/Paris'})`,
+      flags: 64,
+    });
+    return;
   }
 });
 
